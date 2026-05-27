@@ -4,17 +4,22 @@ def init_db():
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     
+    # Drop existing tables if they exist (fresh start for schema)
+    c.execute('DROP TABLE IF EXISTS posts')
+    c.execute('DROP TABLE IF EXISTS templates')
+    
     # 1. Create Templates table
-    c.execute('''CREATE TABLE IF NOT EXISTS templates
+    c.execute('''CREATE TABLE templates
                  (id INTEGER PRIMARY KEY, name TEXT, frame_size TEXT, config_json TEXT)''')
     
-    # 2. Create/Update Posts table
-    c.execute('''CREATE TABLE IF NOT EXISTS posts
-                 (id INTEGER PRIMARY KEY, topic TEXT, caption TEXT, hashtags TEXT, 
-                  image_path TEXT, template_id INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    # 2. Create Posts table with structured fields
+    c.execute('''CREATE TABLE posts
+                 (id INTEGER PRIMARY KEY, topic TEXT, headline TEXT, hook TEXT, caption TEXT, 
+                  cta TEXT, hashtags TEXT, image_path TEXT, template_id INTEGER, 
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
     # 3. Seed initial template
-    c.execute("""INSERT OR IGNORE INTO templates (id, name, frame_size, config_json) 
+    c.execute("""INSERT INTO templates (id, name, frame_size, config_json) 
                  VALUES (1, 'Standard Portrait', '1080x1350', '{"text_x": 50, "text_y": 200}')""")
     
     conn.commit()

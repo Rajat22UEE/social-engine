@@ -1,0 +1,6 @@
+# Auto-detect line endings – Windows users get CRLF, Unix users get LF
+* text=auto
+
+# Explicit overrides if needed
+*.png binary
+*.jpg binary
