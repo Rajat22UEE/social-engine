@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
 import os
@@ -10,7 +10,7 @@ import sqlite3
 import json
 import uuid
 from tenacity import retry, wait_exponential, stop_after_attempt
-from database import init_db, create_session, get_session, update_session_activity, get_brand_kit, upsert_brand_kit, delete_brand_kit, save_canvas_edit, get_canvas_edit, delete_canvas_edit, get_platforms, get_goals, get_template_elements
+from database import init_db, create_session, get_session, update_session_activity, save_canvas_edit, get_canvas_edit, delete_canvas_edit, get_platforms, get_goals
 from generators import generate_post_image
 
 load_dotenv()
@@ -32,22 +32,17 @@ app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 # ── Session Middleware ──────────────────────────────────────────────────────────
 @app.middleware("http")
 async def session_middleware(request: Request, call_next):
-    # Skip session handling for static files
     if request.url.path.startswith("/outputs"):
         return await call_next(request)
     
-    # Get or create session_id from cookies
     session_id = request.cookies.get("session_id")
     
     if not session_id:
-        # Create new session
         session_id = str(uuid.uuid4())
         ip_address = request.client.host if request.client else None
         user_agent = request.headers.get("user-agent", "")
         create_session(session_id, ip_address, user_agent)
-    
     else:
-        # Verify session exists, create new if not
         session = get_session(session_id)
         if not session:
             session_id = str(uuid.uuid4())
@@ -55,61 +50,26 @@ async def session_middleware(request: Request, call_next):
             user_agent = request.headers.get("user-agent", "")
             create_session(session_id, ip_address, user_agent)
         else:
-            # Update last activity
             update_session_activity(session_id)
     
-    # Add session_id to request state
     request.state.session_id = session_id
-    
-    # Process request
     response = await call_next(request)
     
-    # Set session_id cookie
     response.set_cookie(
         key="session_id",
         value=session_id,
-        max_age=30*24*60*60,  # 30 days
+        max_age=30*24*60*60,
         httponly=True,
         samesite="lax"
     )
     
     return response
 
-# ── Session Models ──────────────────────────────────────────────────────────────
-class SessionResponse(BaseModel):
-    session_id: str
-    created_at: str
-    last_activity: str
-
+# ── Request Models ──────────────────────────────────────────────────────────────
 class PostRequest(BaseModel):
     topic: str
     template_id: int
 
-# ── Brand Kit Models ────────────────────────────────────────────────────────────
-class BrandKitCreateRequest(BaseModel):
-    brand_name: str
-    primary_color: str = '#FFD700'
-    secondary_color: str = '#29BE71'
-    accent_color: str = '#64C8FF'
-
-class BrandKitUpdateColorsRequest(BaseModel):
-    primary_color: str = None
-    secondary_color: str = None
-    accent_color: str = None
-
-class BrandKitResponse(BaseModel):
-    id: int
-    brand_name: str
-    logo_path: str = None
-    logo_filename: str = None
-    logo_filesize: int = None
-    primary_color: str
-    secondary_color: str
-    accent_color: str
-
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-# ── Enhanced Generation ─────────────────────────────────────────────────────────
 class GenerateV2Request(BaseModel):
     platform_id: int
     goal_id: int
@@ -119,14 +79,32 @@ class GenerateV2Request(BaseModel):
     tone: str = 'professional'
     cta_text: str = None
     template_id: int = 1
-    brand_kit_id: int = None
+
+class CanvasEditRequest(BaseModel):
+    headline_x: int = None
+    headline_y: int = None
+    headline_size: int = None
+    headline_color: str = None
+    hook_x: int = None
+    hook_y: int = None
+    hook_size: int = None
+    hook_color: str = None
+    caption_x: int = None
+    caption_y: int = None
+    caption_size: int = None
+
+class ExportTextRequest(BaseModel):
+    post_id: int = None
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# ── Gemini API Calls ────────────────────────────────────────────────────────────
 
 @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
 def call_gemini_v2(platform: dict, goal: dict, topic: str, industry: str = None,
                     audience: str = None, tone: str = 'professional', cta_text: str = None) -> dict:
     """Generate platform + goal aware marketing content."""
     
-    # Platform-specific rules
     platform_rules = {
         'instagram': {
             'style': 'short punchy hook, emotional trigger, visual-first, minimal text',
@@ -150,7 +128,6 @@ def call_gemini_v2(platform: dict, goal: dict, topic: str, industry: str = None,
         }
     }
     
-    # Goal-specific rules
     goal_rules = {
         'engagement': {
             'hook_style': 'curiosity, question-based',
@@ -241,9 +218,7 @@ Return ONLY valid JSON (no markdown, no backticks, no extra text):
         contents=prompt
     )
     
-    # Parse JSON response
     text = response.text.strip()
-    # Remove markdown code blocks if present
     if text.startswith("```"):
         text = text[text.find("{"):text.rfind("}")+1]
     
@@ -261,11 +236,9 @@ async def get_history_endpoint(request: Request, page: int = 1, limit: int = 12)
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     
-    # Get total count
     c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ?", (session_id,))
     total = c.fetchone()[0]
     
-    # Get paginated posts
     c.execute("""SELECT id, topic, headline, hook, caption, cta, hashtags, image_path, 
                   template_id, liked, favorite, view_count, created_at
                   FROM posts WHERE session_id = ?
@@ -309,27 +282,21 @@ async def get_stats_endpoint(request: Request):
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     
-    # Total posts
     c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ?", (session_id,))
     total_posts = c.fetchone()[0]
     
-    # Posts today
     c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND date(created_at) = date('now')", (session_id,))
     posts_today = c.fetchone()[0]
     
-    # Posts this week
     c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND created_at >= datetime('now', '-7 days')", (session_id,))
     posts_week = c.fetchone()[0]
     
-    # Favorites
     c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND favorite = 1", (session_id,))
     favorites = c.fetchone()[0]
     
-    # Total views (downloads)
     c.execute("SELECT COALESCE(SUM(view_count), 0) FROM posts WHERE session_id = ?", (session_id,))
     total_views = c.fetchone()[0]
     
-    # Most used hashtags (get last 50 posts hashtags)
     c.execute("SELECT hashtags FROM posts WHERE session_id = ? AND hashtags IS NOT NULL ORDER BY created_at DESC LIMIT 50", (session_id,))
     hashtag_rows = c.fetchall()
     
@@ -393,7 +360,6 @@ async def delete_post_endpoint(request: Request, post_id: int):
         conn.close()
         return {"error": "Post not found"}
     
-    # Delete the image file
     image_path = row[0]
     if image_path and os.path.exists(image_path):
         try:
@@ -421,124 +387,6 @@ async def get_current_session(request: Request):
         }
     return {"error": "Session not found"}
 
-# ── Brand Kit Endpoints ────────────────────────────────────────────────────────
-
-ALLOWED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
-
-@app.get("/api/v1/brand-kit/get")
-async def get_brand_kit_endpoint(request: Request):
-    """Get brand kit for current session."""
-    session_id = request.state.session_id
-    kit = get_brand_kit(session_id)
-    if kit:
-        return {
-            "status": "success",
-            "brand_kit": {
-                "id": kit["id"],
-                "brand_name": kit["brand_name"],
-                "logo_path": kit["logo_path"],
-                "logo_filename": kit["logo_filename"],
-                "logo_filesize": kit["logo_filesize"],
-                "primary_color": kit["primary_color"],
-                "secondary_color": kit["secondary_color"],
-                "accent_color": kit["accent_color"],
-                "created_at": kit["created_at"],
-                "updated_at": kit["updated_at"]
-            }
-        }
-    return {"status": "success", "brand_kit": None}
-
-@app.post("/api/v1/brand-kit/create")
-async def create_brand_kit_endpoint(request: Request, data: BrandKitCreateRequest):
-    """Create a new brand kit for the current session."""
-    session_id = request.state.session_id
-    kit_data = {
-        'brand_name': data.brand_name,
-        'primary_color': data.primary_color,
-        'secondary_color': data.secondary_color,
-        'accent_color': data.accent_color
-    }
-    kit = upsert_brand_kit(session_id, kit_data)
-    return {
-        "status": "success",
-        "message": "Brand kit created successfully",
-        "brand_kit": {
-            "id": kit["id"],
-            "brand_name": kit["brand_name"],
-            "primary_color": kit["primary_color"],
-            "secondary_color": kit["secondary_color"],
-            "accent_color": kit["accent_color"]
-        }
-    }
-
-@app.post("/api/v1/brand-kit/upload-logo")
-async def upload_logo_endpoint(request: Request, file: UploadFile = File(...)):
-    """Upload a logo image for the brand kit."""
-    session_id = request.state.session_id
-    
-    # Validate file extension
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}
-        )
-    
-    # Ensure upload directory exists
-    upload_dir = "uploads/logos"
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Save file with unique name
-    unique_filename = f"{uuid.uuid4().hex}{ext}"
-    file_path = os.path.join(upload_dir, unique_filename)
-    content = await file.read()
-    
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    # Update brand kit with logo info
-    kit_data = {
-        'logo_path': file_path,
-        'logo_filename': file.filename,
-        'logo_filesize': len(content)
-    }
-    kit = upsert_brand_kit(session_id, kit_data)
-    
-    return {
-        "status": "success",
-        "message": "Logo uploaded successfully",
-        "logo_path": file_path,
-        "logo_filename": file.filename,
-        "logo_filesize": len(content)
-    }
-
-@app.put("/api/v1/brand-kit/update-colors")
-async def update_colors_endpoint(request: Request, data: BrandKitUpdateColorsRequest):
-    """Update brand kit colors."""
-    session_id = request.state.session_id
-    
-    kit_data = {}
-    if data.primary_color is not None:
-        kit_data['primary_color'] = data.primary_color
-    if data.secondary_color is not None:
-        kit_data['secondary_color'] = data.secondary_color
-    if data.accent_color is not None:
-        kit_data['accent_color'] = data.accent_color
-    
-    if not kit_data:
-        return {"error": "No colors provided to update"}
-    
-    kit = upsert_brand_kit(session_id, kit_data)
-    return {
-        "status": "success",
-        "message": "Colors updated successfully",
-        "brand_kit": {
-            "primary_color": kit["primary_color"],
-            "secondary_color": kit["secondary_color"],
-            "accent_color": kit["accent_color"]
-        }
-    }
-
 # ── Platform & Goal Endpoints ─────────────────────────────────────────────────
 
 @app.get("/api/v1/platforms")
@@ -560,7 +408,6 @@ async def get_templates_endpoint(platform: str = None):
     c = conn.cursor()
     
     if platform:
-        # Filter templates by platform keyword in name
         c.execute("SELECT id, name, frame_size, config_json FROM templates WHERE LOWER(name) LIKE ?", (f'%{platform.lower()}%',))
     else:
         c.execute("SELECT id, name, frame_size, config_json FROM templates")
@@ -576,28 +423,12 @@ async def get_templates_endpoint(platform: str = None):
     
     return {"status": "success", "templates": templates}
 
-@app.delete("/api/v1/brand-kit/delete")
-async def delete_brand_kit_endpoint(request: Request):
-    """Delete brand kit for current session."""
-    session_id = request.state.session_id
-    deleted = delete_brand_kit(session_id)
-    if deleted:
-        return {"status": "success", "message": "Brand kit deleted"}
-    return {"error": "No brand kit found to delete"}
-
 # ── Export Endpoints ──────────────────────────────────────────────────────────
-
-class ExportTextRequest(BaseModel):
-    post_id: int = None
 
 @app.get("/api/v1/export/download")
 async def export_download_endpoint(request: Request, post_id: int = None, image_path: str = None):
-    """
-    Download a generated image.
-    Provide either post_id (fetches from DB) or image_path directly.
-    """
+    """Download a generated image."""
     file_path = None
-    post_row = None
     
     if post_id:
         conn = sqlite3.connect('database.db')
@@ -607,7 +438,6 @@ async def export_download_endpoint(request: Request, post_id: int = None, image_
         conn.close()
         if row:
             file_path = row[0]
-            # Track download
             conn = sqlite3.connect('database.db')
             c = conn.cursor()
             c.execute("UPDATE posts SET view_count = view_count + 1, last_downloaded = CURRENT_TIMESTAMP WHERE id = ?", (post_id,))
@@ -664,7 +494,6 @@ async def generate_post_v2(request: Request, data: GenerateV2Request):
     try:
         session_id = request.state.session_id
         
-        # Fetch platform & goal info
         platforms = get_platforms()
         goals = get_goals()
         platform = next((p for p in platforms if p['id'] == data.platform_id), None)
@@ -673,18 +502,6 @@ async def generate_post_v2(request: Request, data: GenerateV2Request):
         if not platform or not goal:
             return {"error": "Invalid platform or goal selection"}
         
-        # Fetch brand kit colors
-        brand_colors = None
-        brand_kit = get_brand_kit(session_id) if data.brand_kit_id else None
-        if brand_kit:
-            brand_colors = {
-                'primary_color': brand_kit['primary_color'],
-                'secondary_color': brand_kit['secondary_color'],
-                'accent_color': brand_kit['accent_color'],
-                'logo_path': brand_kit.get('logo_path'),
-            }
-        
-        # Generate platform-aware content
         content_data = call_gemini_v2(
             platform, goal, data.topic,
             industry=data.industry,
@@ -693,18 +510,15 @@ async def generate_post_v2(request: Request, data: GenerateV2Request):
             cta_text=data.cta_text
         )
         
-        # Generate image
-        image_path = generate_post_image(data.template_id, data.topic, content_data, brand_colors)
+        image_path = generate_post_image(data.template_id, data.topic, content_data)
         
-        # Store in database with all metadata
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
-        c.execute("""INSERT INTO posts (session_id, brand_kit_id, platform_id, goal_id, topic, 
+        c.execute("""INSERT INTO posts (session_id, platform_id, goal_id, topic, 
                     headline, subheading, hook, caption, cta, hashtags, image_path, template_id, 
                     industry, tone, target_audience)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                   (session_id,
-                   brand_kit['id'] if brand_kit else None,
                    data.platform_id, data.goal_id,
                    data.topic,
                    content_data.get('headline', ''),
@@ -735,7 +549,6 @@ async def generate_post_v2(request: Request, data: GenerateV2Request):
             "hashtags": content_data.get('hashtags', []),
             "content_angle": content_data.get('content_angle', ''),
             "image_path": image_path,
-            "branded": brand_colors is not None,
             "design_rules": {
                 "platform": platform['key'],
                 "text_density": next((pr['density'] for pk, pr in [
@@ -750,19 +563,6 @@ async def generate_post_v2(request: Request, data: GenerateV2Request):
         return {"error": f"Generation failed: {str(e)}"}
 
 # ── Canvas Editor Endpoints ──────────────────────────────────────────────────
-
-class CanvasEditRequest(BaseModel):
-    headline_x: int = None
-    headline_y: int = None
-    headline_size: int = None
-    headline_color: str = None
-    hook_x: int = None
-    hook_y: int = None
-    hook_size: int = None
-    hook_color: str = None
-    caption_x: int = None
-    caption_y: int = None
-    caption_size: int = None
 
 @app.get("/api/v1/canvas-edit/{post_id}")
 async def get_canvas_edit_endpoint(post_id: int):
@@ -782,7 +582,6 @@ async def preview_canvas_edit_endpoint(request: Request, post_id: int, data: Can
     """Re-render an existing post with custom positioning and return new image."""
     session_id = request.state.session_id
     
-    # Fetch original post data
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     c.execute("""SELECT topic, headline, hook, caption, cta, hashtags, image_path, template_id 
@@ -796,21 +595,8 @@ async def preview_canvas_edit_endpoint(request: Request, post_id: int, data: Can
     topic, headline, hook, caption, cta, hashtags_json, old_image_path, template_id = row
     hashtags = json.loads(hashtags_json) if hashtags_json else []
     
-    # Fetch brand kit colors
-    brand_colors = None
-    brand_kit = get_brand_kit(session_id)
-    if brand_kit:
-        brand_colors = {
-            'primary_color': brand_kit['primary_color'],
-            'secondary_color': brand_kit['secondary_color'],
-            'accent_color': brand_kit['accent_color'],
-            'logo_path': brand_kit.get('logo_path'),
-        }
-    
-    # Build canvas edits from request
     canvas_edits = {k: v for k, v in data.dict().items() if v is not None}
     
-    # Generate preview image with custom edits
     content_data = {
         "headline": headline,
         "hook": hook,
@@ -819,7 +605,7 @@ async def preview_canvas_edit_endpoint(request: Request, post_id: int, data: Can
         "hashtags": hashtags
     }
     new_image_path = generate_post_image(
-        template_id, f"preview_{post_id}", content_data, brand_colors, canvas_edits
+        template_id, f"preview_{post_id}", content_data, canvas_edits=canvas_edits
     )
     
     return {
@@ -832,6 +618,8 @@ async def reset_canvas_edit_endpoint(post_id: int):
     """Reset canvas edits to template defaults."""
     deleted = delete_canvas_edit(post_id)
     return {"status": "success", "reset": deleted}
+
+# ── Legacy Endpoints ──────────────────────────────────────────────────────────
 
 @app.get("/templates")
 async def get_templates():
@@ -847,27 +635,14 @@ async def generate_post(request: Request, data: PostRequest):
     try:
         session_id = request.state.session_id
         
-        # Fetch brand kit colors (if exists)
-        brand_colors = None
-        brand_kit = get_brand_kit(session_id)
-        if brand_kit:
-            brand_colors = {
-                'primary_color': brand_kit['primary_color'],
-                'secondary_color': brand_kit['secondary_color'],
-                'accent_color': brand_kit['accent_color'],
-                'logo_path': brand_kit.get('logo_path'),
-            }
-        
         content_data = call_gemini(data.topic)
-        image_path = generate_post_image(data.template_id, data.topic, content_data, brand_colors)
+        image_path = generate_post_image(data.template_id, data.topic, content_data)
         
-        # Store in database with session_id and brand_kit_id
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
-        c.execute("""INSERT INTO posts (session_id, brand_kit_id, topic, headline, hook, caption, cta, hashtags, image_path, template_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (session_id, 
-                   brand_kit['id'] if brand_kit else None,
+        c.execute("""INSERT INTO posts (session_id, topic, headline, hook, caption, cta, hashtags, image_path, template_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (session_id,
                    data.topic, content_data['headline'], content_data['hook'], 
                    content_data['caption'], content_data['cta'], 
                    json.dumps(content_data['hashtags']), image_path, data.template_id))
@@ -883,8 +658,7 @@ async def generate_post(request: Request, data: PostRequest):
             "caption": content_data['caption'],
             "cta": content_data['cta'],
             "hashtags": content_data['hashtags'],
-            "image_path": image_path,
-            "branded": brand_colors is not None
+            "image_path": image_path
         }
     except json.JSONDecodeError as e:
         return {"error": f"Failed to parse Gemini response as JSON: {str(e)}"}
