@@ -12,8 +12,6 @@ def init_db():
     c.execute('DROP TABLE IF EXISTS goals')
     c.execute('DROP TABLE IF EXISTS platforms')
     c.execute('DROP TABLE IF EXISTS canvas_edits')
-    c.execute('DROP TABLE IF EXISTS brand_kits')
-    c.execute('DROP TABLE IF EXISTS color_variations')
     c.execute('DROP TABLE IF EXISTS posts')
     c.execute('DROP TABLE IF EXISTS templates')
     c.execute('DROP TABLE IF EXISTS user_sessions')
@@ -46,31 +44,6 @@ def init_db():
                   template_style TEXT,
                   default_cta_style TEXT)''')
     
-    # 0c. Brand Kits table
-    c.execute('''CREATE TABLE brand_kits
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_session_id TEXT UNIQUE NOT NULL,
-                  brand_name TEXT,
-                  logo_path TEXT,
-                  logo_filename TEXT,
-                  logo_filesize INTEGER,
-                  primary_color_hex TEXT DEFAULT '#FFD700',
-                  secondary_color_hex TEXT DEFAULT '#29BE71',
-                  accent_color_hex TEXT DEFAULT '#64C8FF',
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (user_session_id) REFERENCES user_sessions(session_id))''')
-    
-    # 0d. Color Variations table
-    c.execute('''CREATE TABLE color_variations
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  brand_kit_id INTEGER NOT NULL,
-                  variation_name TEXT,
-                  color_type TEXT,
-                  hex_value TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (brand_kit_id) REFERENCES brand_kits(id))''')
-    
     # 1. Templates table
     c.execute('''CREATE TABLE templates
                  (id INTEGER PRIMARY KEY, name TEXT, frame_size TEXT, config_json TEXT)''')
@@ -93,7 +66,6 @@ def init_db():
     c.execute('''CREATE TABLE posts
                  (id INTEGER PRIMARY KEY, 
                   session_id TEXT,
-                  brand_kit_id INTEGER,
                   platform_id INTEGER,
                   goal_id INTEGER,
                   topic TEXT, 
@@ -115,7 +87,6 @@ def init_db():
                   last_downloaded TIMESTAMP,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (session_id) REFERENCES user_sessions(session_id),
-                  FOREIGN KEY (brand_kit_id) REFERENCES brand_kits(id),
                   FOREIGN KEY (platform_id) REFERENCES platforms(id),
                   FOREIGN KEY (goal_id) REFERENCES goals(id))''')
     
@@ -149,15 +120,13 @@ def init_db():
                   tone TEXT DEFAULT 'professional',
                   cta_text TEXT,
                   template_id INTEGER,
-                  brand_kit_id INTEGER,
                   content_angle TEXT,
                   status TEXT DEFAULT 'draft',
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (session_id) REFERENCES user_sessions(session_id),
                   FOREIGN KEY (platform_id) REFERENCES platforms(id),
                   FOREIGN KEY (goal_id) REFERENCES goals(id),
-                  FOREIGN KEY (template_id) REFERENCES templates(id),
-                  FOREIGN KEY (brand_kit_id) REFERENCES brand_kits(id))''')
+                  FOREIGN KEY (template_id) REFERENCES templates(id))''')
     
     # ── SEED DATA ────────────────────────────────────────────────────────────────
     
@@ -274,79 +243,6 @@ def update_session_activity(session_id: str):
     conn.close()
 
 
-# ── Brand Kit Helpers ──────────────────────────────────────────────────────────
-
-def get_brand_kit(session_id: str) -> dict:
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("""SELECT id, user_session_id, brand_name, logo_path, logo_filename, logo_filesize, 
-                  primary_color_hex, secondary_color_hex, accent_color_hex, created_at, updated_at
-                  FROM brand_kits WHERE user_session_id = ?""", (session_id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "user_session_id": row[1],
-            "brand_name": row[2],
-            "logo_path": row[3],
-            "logo_filename": row[4],
-            "logo_filesize": row[5],
-            "primary_color": row[6],
-            "secondary_color": row[7],
-            "accent_color": row[8],
-            "created_at": row[9],
-            "updated_at": row[10]
-        }
-    return None
-
-def upsert_brand_kit(session_id: str, data: dict) -> dict:
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    existing = get_brand_kit(session_id)
-    if existing:
-        updates = []
-        params = []
-        for field, db_col in [
-            ('brand_name', 'brand_name'),
-            ('logo_path', 'logo_path'),
-            ('logo_filename', 'logo_filename'),
-            ('logo_filesize', 'logo_filesize'),
-            ('primary_color', 'primary_color_hex'),
-            ('secondary_color', 'secondary_color_hex'),
-            ('accent_color', 'accent_color_hex'),
-        ]:
-            if field in data and data[field] is not None:
-                updates.append(f"{db_col} = ?")
-                params.append(data[field])
-        if updates:
-            updates.append("updated_at = CURRENT_TIMESTAMP")
-            params.append(session_id)
-            c.execute(f"UPDATE brand_kits SET {', '.join(updates)} WHERE user_session_id = ?", params)
-    else:
-        c.execute("""INSERT INTO brand_kits 
-                      (user_session_id, brand_name, logo_path, logo_filename, logo_filesize,
-                       primary_color_hex, secondary_color_hex, accent_color_hex)
-                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (session_id, data.get('brand_name'), data.get('logo_path'),
-                   data.get('logo_filename'), data.get('logo_filesize'),
-                   data.get('primary_color', '#FFD700'),
-                   data.get('secondary_color', '#29BE71'),
-                   data.get('accent_color', '#64C8FF')))
-    conn.commit()
-    conn.close()
-    return get_brand_kit(session_id)
-
-def delete_brand_kit(session_id: str) -> bool:
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM brand_kits WHERE user_session_id = ?", (session_id,))
-    deleted = c.rowcount > 0
-    conn.commit()
-    conn.close()
-    return deleted
-
-
 # ── Platform & Goal Helpers ───────────────────────────────────────────────────
 
 def get_platforms() -> list:
@@ -383,12 +279,12 @@ def create_generation_session(session_id: str, data: dict) -> int:
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
     c.execute("""INSERT INTO generation_sessions 
-                  (session_id, platform_id, goal_id, topic, industry, target_audience, tone, cta_text, template_id, brand_kit_id, content_angle)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  (session_id, platform_id, goal_id, topic, industry, target_audience, tone, cta_text, template_id, content_angle)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
               (session_id, data.get('platform_id'), data.get('goal_id'),
                data.get('topic'), data.get('industry'), data.get('target_audience'),
                data.get('tone', 'professional'), data.get('cta_text'),
-               data.get('template_id'), data.get('brand_kit_id'), data.get('content_angle')))
+               data.get('template_id'), data.get('content_angle')))
     gen_id = c.lastrowid
     conn.commit()
     conn.close()
