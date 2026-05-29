@@ -2,4 +2,9 @@ venv/
 database.db
 __pycache__/
 .env
-output/
+
+# Ignore all files in outputs/ and templates/ but keep directories with .gitkeep
+social-engine-api/outputs/*
+!social-engine-api/outputs/.gitkeep
+social-engine-api/templates/*
+!social-engine-api/templates/.gitkeep

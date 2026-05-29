@@ -1,18 +1,6 @@
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-# ── Canvas & Template Constants ───────────────────────────────────────────────
-CANVAS_SIZE = 1254          # Template is 1254×1254 px (square)
-
-# ── Content Zone ──────────────────────────────────────────────────────────────
-# Template safe zones (from kyma-AI template):
-#   Top section full width (x:64→1185) from y:228 onward
-#   Footer starts at y:930 - don't draw below this
-LEFT_X      = 64
-RIGHT_X     = 1185
-TOP_Y       = 228
-FOOTER_Y    = 930
-CONTENT_W   = RIGHT_X - LEFT_X    # 1121 px
 
 # ── Font Loading ──────────────────────────────────────────────────────────────
 _POPPINS_BOLD   = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
@@ -32,8 +20,44 @@ def _font(preferred: str, fallback: str, size: int) -> ImageFont.FreeTypeFont:
 # ── Brand Colors ──────────────────────────────────────────────────────────────
 C_NAVY      = (26,  42,  74)    # deep navy – headline
 C_GREEN     = (29, 158, 117)    # kyma-AI brand green – hook card accent
-C_DRK_GRN  = (15, 110,  86)    # dark green – hook text
+C_DRK_GRN   = (15, 110,  86)    # dark green – hook text
 C_LT_GREEN  = (225, 245, 238)   # soft green tint – hook card bg
+
+
+# ── Template Configurations ───────────────────────────────────────────────────
+# Each template has its own layout parameters to fit content perfectly
+TEMPLATE_CONFIG = {
+    # Template 1: Square (1254×1254) - kyma-AI style
+    1: {
+        "width": 1254,
+        "height": 1254,
+        "left_x": 64,
+        "right_x": 1185,
+        "top_y": 350,          # Start lower - more breathing room from top
+        "footer_y": 1050,      # Stop before footer
+        "headline_size": 90,   # Slightly smaller to fit in one line
+        "hook_size": 48,       # Smaller font for better fit
+        "headline_max_lines": 1,
+        "hook_max_lines": 2,
+        "line_spacing": 8,
+        "hook_line_spacing": 18,
+    },
+    # Template 2: Portrait/Stories (941×1672)
+    2: {
+        "width": 941,
+        "height": 1672,
+        "left_x": 50,
+        "right_x": 880,
+        "top_y": 500,          # Start much lower - centered vertically
+        "footer_y": 1400,      # Stop well before bottom
+        "headline_size": 72,   # Smaller for narrower canvas
+        "hook_size": 40,       # Proportionally smaller
+        "headline_max_lines": 1,
+        "hook_max_lines": 2,
+        "line_spacing": 8,
+        "hook_line_spacing": 15,
+    },
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -74,67 +98,80 @@ def _tw(draw: ImageDraw.ImageDraw, text: str,
 
 class TextOverlay:
     """
-    Renders ONLY headline + hook on the template – big, bold, eye-catching.
+    Renders headline + hook on the template with template-specific positioning.
     Caption, CTA, and hashtags are accepted for API/DB compatibility but
     NOT drawn on the image.
     """
 
-    def __init__(self, template_path: str):
+    def __init__(self, template_path: str, template_id: int = 1):
         self.image = Image.open(template_path).convert("RGB")
-        self.draw  = ImageDraw.Draw(self.image)
+        self.draw = ImageDraw.Draw(self.image)
+        self.template_id = template_id
         
-        # Large fonts – headline dominates, hook is bold but slightly smaller
-        self.f_head = _font(_POPPINS_BOLD,   _LIB_BOLD,  112)  # massive headline
-        self.f_hook = _font(_POPPINS_MEDIUM, _LIB_REG,    56)  # bold hook
+        # Load template-specific config
+        config = TEMPLATE_CONFIG.get(template_id, TEMPLATE_CONFIG[1])
+        self.config = config
+        
+        # Calculate content width
+        self.content_w = config["right_x"] - config["left_x"]
+        
+        # Load fonts sized for this template
+        self.f_head = _font(_POPPINS_BOLD, _LIB_BOLD, config["headline_size"])
+        self.f_hook = _font(_POPPINS_MEDIUM, _LIB_REG, config["hook_size"])
 
     def _headline(self, text: str, x: int, y: int) -> int:
         """
-        Huge navy headline (112pt) – max 2 lines, centre-aligned.
+        Navy headline – single line, centre-aligned.
         Returns Y below the last line.
         """
-        lines = _wrap(self.draw, text, self.f_head, CONTENT_W - 80)[:2]
+        max_lines = self.config["headline_max_lines"]
+        lines = _wrap(self.draw, text, self.f_head, self.content_w - 40)[:max_lines]
         if not lines:
             return y
 
         for ln in lines:
             # Centre this line horizontally
             lw = _tw(self.draw, ln, self.f_head)
-            cx = x + (CONTENT_W - lw) // 2
+            cx = x + (self.content_w - lw) // 2
             self.draw.text((cx, y), ln, font=self.f_head, fill=C_NAVY)
-            y += _lh(self.draw, ln, self.f_head) + 10
-        return y + 60
+            y += _lh(self.draw, ln, self.f_head) + self.config["line_spacing"]
+        
+        # Add spacing after headline
+        return y + 40
 
     def _hook(self, text: str, x: int, y: int) -> int:
         """
-        Hook (56pt) in a soft-green full-width card with a bold green left stripe.
-        Max 4 lines to fill vertical space.
+        Hook in a soft-green card with a bold green left stripe.
+        Max 2 lines for punchy, focused messaging.
         Returns Y below the block.
         """
-        lines = _wrap(self.draw, text, self.f_hook, CONTENT_W - 100)[:4]
+        max_lines = self.config["hook_max_lines"]
+        lines = _wrap(self.draw, text, self.f_hook, self.content_w - 60)[:max_lines]
         if not lines:
             return y
 
-        line_h  = _lh(self.draw, lines[0], self.f_hook)
-        block_h = len(lines) * (line_h + 20) - 20 + 50   # padding top+bottom
+        line_h = _lh(self.draw, lines[0], self.f_hook)
+        line_spacing = self.config["hook_line_spacing"]
+        block_h = len(lines) * (line_h + line_spacing) - line_spacing + 40  # padding top+bottom
 
         # Full-width card
         self.draw.rounded_rectangle(
-            [x, y, RIGHT_X, y + block_h],
-            radius=16, fill=C_LT_GREEN
+            [x, y, self.config["right_x"], y + block_h],
+            radius=12, fill=C_LT_GREEN
         )
         # Bold left accent stripe
         self.draw.rounded_rectangle(
-            [x, y, x + 10, y + block_h],
-            radius=6, fill=C_GREEN
+            [x, y, x + 8, y + block_h],
+            radius=4, fill=C_GREEN
         )
 
-        ty = y + 25
+        ty = y + 20
         for ln in lines:
             # Centre each line within the card
             lw = _tw(self.draw, ln, self.f_hook)
-            cx = x + (CONTENT_W - lw) // 2
+            cx = x + (self.content_w - lw) // 2
             self.draw.text((cx, ty), ln, font=self.f_hook, fill=C_DRK_GRN)
-            ty += _lh(self.draw, ln, self.f_hook) + 20
+            ty += _lh(self.draw, ln, self.f_hook) + line_spacing
 
         return y + block_h
 
@@ -146,13 +183,13 @@ class TextOverlay:
         Only headline + hook are rendered. All other params are accepted
         for API/DB compatibility but NOT drawn on the image.
         """
-        cy = TOP_Y
+        cy = self.config["top_y"]
 
         # ── Headline (big, bold, centred) ─────────────────────────────────
-        cy = self._headline(headline, LEFT_X, cy)
+        cy = self._headline(headline, self.config["left_x"], cy)
 
-        # ── Hook (card with accent stripe – fills remaining space) ────────
-        self._hook(hook, LEFT_X, cy)
+        # ── Hook (card with accent stripe) ────────────────────────────────
+        self._hook(hook, self.config["left_x"], cy)
 
     def save(self, output_path: str) -> None:
         os.makedirs(
@@ -179,7 +216,7 @@ def generate_post_image(template_id: int, topic: str,
         str – relative path to saved image, e.g. "outputs/gen_Topic_1.png"
     """
     template_file = f"templates/template_{template_id}.png"
-    output_file   = f"outputs/gen_{topic[:8].strip()}_{template_id}.png"
+    output_file = f"outputs/gen_{topic[:8].strip()}_{template_id}.png"
 
     if not os.path.exists(template_file):
         raise FileNotFoundError(
@@ -187,14 +224,14 @@ def generate_post_image(template_id: int, topic: str,
             f"Place your template PNG at that path."
         )
 
-    overlay = TextOverlay(template_file)
+    overlay = TextOverlay(template_file, template_id)
     overlay.render(
-        topic    = topic,
-        headline = content_data.get("headline", ""),
-        hook     = content_data.get("hook",     ""),
-        caption  = content_data.get("caption",  ""),
-        cta      = content_data.get("cta",      ""),
-        hashtags = content_data.get("hashtags", []),
+        topic=topic,
+        headline=content_data.get("headline", ""),
+        hook=content_data.get("hook", ""),
+        caption=content_data.get("caption", ""),
+        cta=content_data.get("cta", ""),
+        hashtags=content_data.get("hashtags", []),
     )
     overlay.save(output_file)
     return output_file

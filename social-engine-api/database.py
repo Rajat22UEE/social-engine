@@ -18,9 +18,11 @@ def init_db():
                   cta TEXT, hashtags TEXT, image_path TEXT, template_id INTEGER, 
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    # 3. Seed initial template
+    # 3. Seed initial templates
     c.execute("""INSERT INTO templates (id, name, frame_size, config_json) 
-                 VALUES (1, 'Standard Portrait', '1080x1350', '{"text_x": 50, "text_y": 200}')""")
+                 VALUES (1, 'Standard Portrait', '1254x1254', '{"text_x": 50, "text_y": 200}')""")
+    c.execute("""INSERT INTO templates (id, name, frame_size, config_json) 
+                 VALUES (2, 'Stories / Portrait', '941x1672', '{"text_x": 50, "text_y": 200}')""")
     
     conn.commit()
     conn.close()
