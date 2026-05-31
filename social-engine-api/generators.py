@@ -1,80 +1,77 @@
 from PIL import Image, ImageDraw, ImageFont
 import os
 
-
 # ── Font Loading ──────────────────────────────────────────────────────────────
-_POPPINS_BOLD   = "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf"
-_POPPINS_MEDIUM = "/usr/share/fonts/truetype/google-fonts/Poppins-Medium.ttf"
-_POPPINS_REG    = "/usr/share/fonts/truetype/google-fonts/Poppins-Regular.ttf"
-_LIB_BOLD       = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
-_LIB_REG        = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+_FONT_PATHS = [
+    "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
+    "/usr/share/fonts/truetype/google-fonts/Poppins-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "arial.ttf",
+]
 
 
-def _font(preferred: str, fallback: str, size: int) -> ImageFont.FreeTypeFont:
-    for path in (preferred, fallback, _LIB_BOLD, _LIB_REG, "arial.ttf"):
-        if path and os.path.exists(path):
+def _load_font(size: int) -> ImageFont.FreeTypeFont:
+    for path in _FONT_PATHS:
+        if os.path.exists(path):
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
 
-# ── Default Colors ──────────────────────────────────────────────────────────
-C_NAVY      = (26,  42,  74)    # deep navy – headline
-C_GREEN     = (29, 158, 117)    # green – hook card accent
-C_DRK_GRN   = (15, 110,  86)    # dark green – hook text
-C_LT_GREEN  = (225, 245, 238)   # soft green tint – hook card bg
+# ── Color Palette ─────────────────────────────────────────────────────────────
+C_NAVY       = (26,  42,  74)   # headlines
+C_GREEN      = (29, 158, 117)  # hook accent bar
+C_DARK_GREEN = (15, 110,  86)  # hook text
 
 
-# ── Template Configurations ───────────────────────────────────────────────────
-TEMPLATE_CONFIG = {
+# ── Template Configs (Headline + Hook only, full-width layout) ────────────────
+TEMPLATE_CONFIGS = {
+    # Feed (4:5, 1080x1350)
     1: {
-        "width": 1254, "height": 1254,
-        "left_x": 64, "right_x": 1185, "top_y": 350, "footer_y": 1050,
-        "headline_size": 90, "hook_size": 48,
-        "headline_max_lines": 2, "hook_max_lines": 2,
-        "line_spacing": 8, "hook_line_spacing": 18,
+        "width": 1080, "height": 1350,
+        "elements": {
+            "headline": {
+                "x_pct": 0.04, "y_pct": 0.25,       # 4% left, 25% top
+                "font_size": 76, "color": C_NAVY,
+                "max_lines": 4, "text_width_pct": 0.92,
+            },
+            "hook": {
+                "x_pct": 0.04, "y_pct": 0.38,       # 4% left, 38% top
+                "font_size": 44, "color": C_DARK_GREEN,
+                "max_lines": 3, "text_width_pct": 0.92,
+            },
+        }
     },
+    # Story (9:16, 1080x1920)
     2: {
-        "width": 941, "height": 1672,
-        "left_x": 50, "right_x": 880, "top_y": 500, "footer_y": 1400,
-        "headline_size": 72, "hook_size": 40,
-        "headline_max_lines": 2, "hook_max_lines": 2,
-        "line_spacing": 8, "hook_line_spacing": 15,
-    },
-    3: {
-        "width": 1200, "height": 628,
-        "left_x": 60, "right_x": 1140, "top_y": 100, "footer_y": 500,
-        "headline_size": 64, "hook_size": 36,
-        "headline_max_lines": 2, "hook_max_lines": 2,
-        "line_spacing": 6, "hook_line_spacing": 12,
-    },
-    4: {
-        "width": 1024, "height": 512,
-        "left_x": 50, "right_x": 974, "top_y": 80, "footer_y": 420,
-        "headline_size": 56, "hook_size": 32,
-        "headline_max_lines": 2, "hook_max_lines": 2,
-        "line_spacing": 6, "hook_line_spacing": 10,
-    },
-    5: {
-        "width": 1000, "height": 1500,
-        "left_x": 55, "right_x": 945, "top_y": 350, "footer_y": 1300,
-        "headline_size": 68, "hook_size": 38,
-        "headline_max_lines": 2, "hook_max_lines": 2,
-        "line_spacing": 8, "hook_line_spacing": 14,
-    },
+        "width": 1080, "height": 1920,
+        "elements": {
+            "headline": {
+                "x_pct": 0.05, "y_pct": 0.25,       # 5% left, 25% top
+                "font_size": 60, "color": C_NAVY,
+                "max_lines": 3, "text_width_pct": 0.75,
+            },
+            "hook": {
+                "x_pct": 0.05, "y_pct": 0.35,       # 5% left, 35% top
+                "font_size": 40, "color": C_DARK_GREEN,
+                "max_lines": 4, "text_width_pct": 0.75,
+            },
+        }
+    }
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Text Helpers ──────────────────────────────────────────────────────────────
 
-def _wrap(draw, text, font, max_w):
-    """Word-wrap text to fit within max_w pixels."""
+def _wrap(draw, text, font, max_w_px):
+    """Word-wrap text to fit within max_w_px pixels."""
     words = text.split()
     if not words:
         return []
     lines, cur = [], [words[0]]
     for word in words[1:]:
         candidate = " ".join(cur + [word])
-        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_w:
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_w_px:
             cur.append(word)
         else:
             lines.append(" ".join(cur))
@@ -83,149 +80,114 @@ def _wrap(draw, text, font, max_w):
     return lines
 
 
-def _lh(draw, text, font):
-    """Return pixel height of a single text line."""
+def _text_h(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
     return bb[3] - bb[1]
 
 
-def _tw(draw, text, font):
-    """Return pixel width of a text string."""
+def _text_w(draw, text, font):
     bb = draw.textbbox((0, 0), text, font=font)
     return bb[2] - bb[0]
 
 
-def _lighten_color(rgb, factor):
-    """Lighten a color by blending with white."""
+def _lighten(rgb, factor):
     return tuple(min(255, int(c + (255 - c) * factor)) for c in rgb)
 
 
-def _darken_color(rgb, factor):
-    """Darken a color by blending with black."""
-    return tuple(max(0, int(c * (1 - factor))) for c in rgb)
-
-
-# ── TextOverlay ───────────────────────────────────────────────────────────────
+# ── TextOverlay (Headline + Hook only, full-width coverage) ───────────────────
 
 class TextOverlay:
-    """
-    Renders headline + hook on the template with template-specific positioning.
-    Caption, CTA, and hashtags are accepted for API/DB compatibility but
-    NOT drawn on the image.
-    """
-
-    def __init__(self, template_path: str, template_id: int = 1, canvas_edits: dict = None):
+    def __init__(self, template_path: str, template_id: int = 1):
         self.image = Image.open(template_path).convert("RGB")
         self.draw = ImageDraw.Draw(self.image)
-        self.canvas_edits = canvas_edits or {}
-        
-        config = TEMPLATE_CONFIG.get(template_id, TEMPLATE_CONFIG[1])
-        self.config = config
-        self.content_w = config["right_x"] - config["left_x"]
-        
-        # Load fonts with optional override sizes from canvas_edits
-        headline_size = self.canvas_edits.get('headline_size') or config["headline_size"]
-        hook_size = self.canvas_edits.get('hook_size') or config["hook_size"]
-        self.f_head = _font(_POPPINS_BOLD, _LIB_BOLD, headline_size)
-        self.f_hook = _font(_POPPINS_MEDIUM, _LIB_REG, hook_size)
-        
-        # Default colors
-        self.color_headline = C_NAVY
-        self.color_hook_card_bg = _lighten_color(C_NAVY, 0.85)
-        self.color_hook_accent = C_GREEN
-        self.color_hook_text = _darken_color(C_GREEN, 0.5)
-        self.color_accent = C_GREEN
+        self.config = TEMPLATE_CONFIGS.get(template_id, TEMPLATE_CONFIGS[1])
+        self.w = self.config["width"]
+        self.h = self.config["height"]
 
-    def _headline(self, text, x, y):
-        """Brand-colored headline – single line, centre-aligned."""
-        max_lines = self.config["headline_max_lines"]
-        lines = _wrap(self.draw, text, self.f_head, self.content_w - 40)[:max_lines]
-        if not lines:
-            return y
+    def render(self, headline: str, hook: str):
+        """
+        Render headline and hook with full-width text layout.
+        Each element position is defined as percentage of image dimensions,
+        and text fills the available width proportionally.
+        """
+        cfg = self.config["elements"]
 
-        for ln in lines:
-            lw = _tw(self.draw, ln, self.f_head)
-            cx = x + (self.content_w - lw) // 2
-            self.draw.text((cx, y), ln, font=self.f_head, fill=self.color_headline)
-            y += _lh(self.draw, ln, self.f_head) + self.config["line_spacing"]
-        return y + 40
+        # ── Headline (full-width, left-aligned, multi-line) ─────────────────
+        hl_cfg = cfg.get("headline")
+        if headline and hl_cfg:
+            x = int(self.w * hl_cfg["x_pct"])
+            y = int(self.h * hl_cfg["y_pct"])
+            max_w = int(self.w * hl_cfg["text_width_pct"])
+            font = _load_font(hl_cfg["font_size"])
+            lines = _wrap(self.draw, headline, font, max_w)[:hl_cfg["max_lines"]]
+            if lines:
+                for ln in lines:
+                    self.draw.text((x, y), ln, font=font, fill=hl_cfg["color"])
+                    y += _text_h(self.draw, ln, font) + 8
+                h_end = y + 20
+            else:
+                h_end = y
 
-    def _hook(self, text, x, y):
-        """Hook in a card with accent stripe. Max 2 lines."""
-        max_lines = self.config["hook_max_lines"]
-        lines = _wrap(self.draw, text, self.f_hook, self.content_w - 60)[:max_lines]
-        if not lines:
-            return y
+        # ── Hook (full-width, card background with accent bar) ──────────────
+        hk_cfg = cfg.get("hook")
+        if hook and hk_cfg:
+            x = int(self.w * hk_cfg["x_pct"])
+            y = max(h_end, int(self.h * hk_cfg["y_pct"]))
+            max_w = int(self.w * hk_cfg["text_width_pct"])
+            font = _load_font(hk_cfg["font_size"])
+            lines = _wrap(self.draw, hook, font, max_w)[:hk_cfg["max_lines"]]
+            if lines:
+                line_h = _text_h(self.draw, lines[0], font)
+                spacing = 10
+                block_h = len(lines) * (line_h + spacing) - spacing + 28
+                block_w = int(self.w * hk_cfg["text_width_pct"]) + 20
 
-        line_h = _lh(self.draw, lines[0], self.f_hook)
-        line_spacing = self.config["hook_line_spacing"]
-        block_h = len(lines) * (line_h + line_spacing) - line_spacing + 40
+                # Background card
+                bg_color = _lighten(C_GREEN, 0.85)
+                self.draw.rounded_rectangle(
+                    [x, y, x + block_w, y + block_h],
+                    radius=12, fill=bg_color
+                )
+                # Accent bar on left
+                self.draw.rounded_rectangle(
+                    [x, y, x + 8, y + block_h],
+                    radius=4, fill=C_GREEN
+                )
 
-        self.draw.rounded_rectangle(
-            [x, y, self.config["right_x"], y + block_h],
-            radius=12, fill=self.color_hook_card_bg
-        )
-        self.draw.rounded_rectangle(
-            [x, y, x + 8, y + block_h],
-            radius=4, fill=self.color_hook_accent
-        )
+                y += 14
+                for ln in lines:
+                    lw = _text_w(self.draw, ln, font)
+                    cx = x + 14 + (block_w - 28 - lw) // 2
+                    self.draw.text((cx, y), ln, font=font, fill=hk_cfg["color"])
+                    y += _text_h(self.draw, ln, font) + spacing
 
-        ty = y + 20
-        for ln in lines:
-            lw = _tw(self.draw, ln, self.f_hook)
-            cx = x + (self.content_w - lw) // 2
-            self.draw.text((cx, ty), ln, font=self.f_hook, fill=self.color_hook_text)
-            ty += _lh(self.draw, ln, self.f_hook) + line_spacing
-
-        return y + block_h
-
-    def render(self, headline, hook):
-        """Render headline + hook on the template image."""
-        left_x = self.canvas_edits.get('headline_x') or self.config["left_x"]
-        cy = self.canvas_edits.get('headline_y') or self.config["top_y"]
-
-        cy = self._headline(headline, left_x, cy)
-
-        hook_x = self.canvas_edits.get('hook_x') or self.config["left_x"]
-        hook_y = self.canvas_edits.get('hook_y') or cy
-        self._hook(hook, hook_x, hook_y)
-
-    def save(self, output_path):
-        os.makedirs(
-            os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
-            exist_ok=True
-        )
+    def save(self, output_path: str):
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
         self.image.save(output_path)
 
 
-# ── generate_post_image() ─────────────────────────────────────────────────────
+# ── generate_post_image ───────────────────────────────────────────────────────
 
-def generate_post_image(template_id: int, topic: str,
-                        content_data: dict,
-                        canvas_edits: dict = None) -> str:
+def generate_post_image(template_id: int, topic: str, content_data: dict) -> str:
     """
-    Generate a post image and save to outputs/.
-    Accepts optional canvas_edits for custom text positioning.
+    Generate an Instagram post image with headline + hook overlay.
 
     Args:
-        template_id  : int       – selects templates/template_{id}.png
-        topic        : str       – used in filename
-        content_data : dict      – keys: headline, hook, caption, cta, hashtags
-        canvas_edits : dict, opt – keys: headline_x/y, hook_x/y, size overrides
-
+        template_id: 1 = Feed (4:5), 2 = Story (9:16)
+        topic: used in filename
+        content_data: keys: headline, hook (caption and cta are ignored)
     Returns:
-        str – relative path to saved image, e.g. "outputs/gen_Topic_1.png"
+        relative path like "outputs/gen_Topic_1.png"
     """
     template_file = f"templates/template_{template_id}.png"
-    output_file = f"outputs/gen_{topic[:8].strip()}_{template_id}.png"
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = f"{output_dir}/gen_{topic[:10].strip()}_{template_id}.png"
 
     if not os.path.exists(template_file):
-        raise FileNotFoundError(
-            f"Template not found: '{template_file}'. "
-            f"Place your template PNG at that path."
-        )
+        raise FileNotFoundError(f"Template not found: '{template_file}'")
 
-    overlay = TextOverlay(template_file, template_id, canvas_edits)
+    overlay = TextOverlay(template_file, template_id)
     overlay.render(
         headline=content_data.get("headline", ""),
         hook=content_data.get("hook", ""),

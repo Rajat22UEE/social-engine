@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
@@ -6,11 +6,15 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
 import os
-import sqlite3
 import json
 import uuid
+import time
 from tenacity import retry, wait_exponential, stop_after_attempt
-from database import init_db, create_session, get_session, update_session_activity, save_canvas_edit, get_canvas_edit, delete_canvas_edit, get_platforms, get_goals
+import sqlite3
+from database import (init_db, get_or_create_user, get_templates, get_template,
+                      create_template, update_template, delete_template,
+                      create_post, get_posts, get_post, delete_post,
+                      get_categories, track_event, get_analytics)
 from generators import generate_post_image
 
 load_dotenv()
@@ -26,641 +30,484 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if not os.path.exists("outputs"): os.makedirs("outputs")
+# Serve static files
+os.makedirs("outputs", exist_ok=True)
+os.makedirs("uploads/logos", exist_ok=True)
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
-# ── Session Middleware ──────────────────────────────────────────────────────────
+# ── Session Middleware ─────────────────────────────────────────────────────────
 @app.middleware("http")
 async def session_middleware(request: Request, call_next):
-    if request.url.path.startswith("/outputs"):
+    if request.url.path.startswith("/outputs") or request.url.path.startswith("/uploads"):
         return await call_next(request)
-    
+
     session_id = request.cookies.get("session_id")
-    
     if not session_id:
         session_id = str(uuid.uuid4())
-        ip_address = request.client.host if request.client else None
-        user_agent = request.headers.get("user-agent", "")
-        create_session(session_id, ip_address, user_agent)
-    else:
-        session = get_session(session_id)
-        if not session:
-            session_id = str(uuid.uuid4())
-            ip_address = request.client.host if request.client else None
-            user_agent = request.headers.get("user-agent", "")
-            create_session(session_id, ip_address, user_agent)
-        else:
-            update_session_activity(session_id)
-    
+
+    # Ensure user exists in DB
+    get_or_create_user(session_id)
     request.state.session_id = session_id
+
     response = await call_next(request)
-    
-    response.set_cookie(
-        key="session_id",
-        value=session_id,
-        max_age=30*24*60*60,
-        httponly=True,
-        samesite="lax"
-    )
-    
+    response.set_cookie(key="session_id", value=session_id, max_age=30*24*60*60,
+                        httponly=True, samesite="lax")
     return response
 
-# ── Request Models ──────────────────────────────────────────────────────────────
-class PostRequest(BaseModel):
-    topic: str
-    template_id: int
 
-class GenerateV2Request(BaseModel):
-    platform_id: int
-    goal_id: int
+# ── Pydantic Models ────────────────────────────────────────────────────────────
+
+class GenerateRequest(BaseModel):
     topic: str
-    industry: str = None
-    target_audience: str = None
-    tone: str = 'professional'
-    cta_text: str = None
     template_id: int = 1
+    aspect_ratio: str = '4:5'
+    category: str = None
+    brand_name: str = None
+    cta_text: str = None
 
-class CanvasEditRequest(BaseModel):
-    headline_x: int = None
-    headline_y: int = None
-    headline_size: int = None
-    headline_color: str = None
-    hook_x: int = None
-    hook_y: int = None
-    hook_size: int = None
-    hook_color: str = None
-    caption_x: int = None
-    caption_y: int = None
-    caption_size: int = None
+class TemplateCreate(BaseModel):
+    name: str
+    aspect_ratio: str = '4:5'
+    width: int = 1080
+    height: int = 1350
+    elements: list = []
 
-class ExportTextRequest(BaseModel):
-    post_id: int = None
+class TemplateUpdate(BaseModel):
+    name: str = None
+    aspect_ratio: str = None
+    width: int = None
+    height: int = None
+    elements: list = None
 
+class PostDraftRequest(BaseModel):
+    template_id: int
+    aspect_ratio: str = '4:5'
+    topic: str = None
+    headline: str = None
+    hook: str = None
+    caption: str = None
+    cta: str = None
+    hashtags: str = None
+    image_path: str = None
+    category: str = None
+    brand_name: str = None
+
+# ── Gemini Client ──────────────────────────────────────────────────────────────
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# ── Gemini API Calls ────────────────────────────────────────────────────────────
+CATEGORY_PROMPTS = {
+    'educational': 'Educational content — share knowledge and industry insights.',
+    'promotional': 'Promotional content — highlight value proposition and CTA.',
+    'case_study': 'Case study — present before/after or problem/solution narrative.',
+    'engagement': 'Engagement content — ask questions, spark conversations.',
+    'branding': 'Branding content — company intro, culture, team spotlight.',
+    'testimonial': 'Testimonial — showcase customer reviews and social proof.',
+    'event': 'Event promotion — create urgency, highlight event details.',
+    'quote': 'Quote — inspirational or thought leadership statement.',
+}
 
 @retry(wait=wait_exponential(multiplier=1, min=4, max=60), stop=stop_after_attempt(3))
-def call_gemini_v2(platform: dict, goal: dict, topic: str, industry: str = None,
-                    audience: str = None, tone: str = 'professional', cta_text: str = None) -> dict:
-    """Generate platform + goal aware marketing content."""
-    
-    platform_rules = {
-        'instagram': {
-            'style': 'short punchy hook, emotional trigger, visual-first, minimal text',
-            'headline_max': platform.get('max_headline_chars', 50),
-            'density': 'minimal'
-        },
-        'linkedin': {
-            'style': 'authority-driven, professional tone, business pain points, slightly longer',
-            'headline_max': platform.get('max_headline_chars', 80),
-            'density': 'medium'
-        },
-        'twitter': {
-            'style': 'ultra-concise, witty, conversation starter, hook-heavy',
-            'headline_max': platform.get('max_headline_chars', 40),
-            'density': 'minimal'
-        },
-        'facebook': {
-            'style': 'conversational, community tone, relatable, slightly longer',
-            'headline_max': platform.get('max_headline_chars', 70),
-            'density': 'medium'
-        }
-    }
-    
-    goal_rules = {
-        'engagement': {
-            'hook_style': 'curiosity, question-based',
-            'cta_style': 'question or poll'
-        },
-        'educational': {
-            'hook_style': 'value-driven, list-style',
-            'cta_style': 'learn more'
-        },
-        'promotional': {
-            'hook_style': 'urgency, benefit-focused',
-            'cta_style': 'shop now or sign up'
-        },
-        'authority': {
-            'hook_style': 'data-driven, thought leadership',
-            'cta_style': 'read more'
-        },
-        'motivational': {
-            'hook_style': 'inspirational, aspirational',
-            'cta_style': 'join now'
-        }
-    }
-    
-    platform_key = platform.get('key', 'instagram')
-    goal_key = goal.get('key', 'engagement')
-    p_rule = platform_rules.get(platform_key, platform_rules['instagram'])
-    g_rule = goal_rules.get(goal_key, goal_rules['engagement'])
-    
-    max_chars = p_rule['headline_max']
-    tone_desc = tone or 'professional'
-    audience_str = f"Target audience: {audience}" if audience else ""
-    industry_str = f"Industry: {industry}" if industry else ""
-    
-    prompt = f"""You are a professional social media copywriter generating content for {platform['name']}.
+def call_gemini(topic: str, category: str = None, brand_name: str = None, cta_text: str = None) -> dict:
+    """Generate Instagram marketing content with AI."""
+    cat_instruction = CATEGORY_PROMPTS.get(category, 'Professional business promotion content.')
+    brand_instruction = f"Brand: {brand_name}. " if brand_name else ""
+    cta_instruction = f"CTA: {cta_text}. " if cta_text else ""
 
-Platform Rules:
-- Style: {p_rule['style']}
-- Max headline chars: {max_chars}
-- Text density: {p_rule['density']}
+    prompt = f"""You are a professional Instagram content creator for business brands.
+Your tone is professional, polished, and business-focused.
 
-Content Goal: {goal['name']}
-- Hook style: {g_rule['hook_style']}
-- CTA style: {g_rule['cta_style']}
-
-Tone: {tone_desc}
-{industry_str}
-{audience_str}
-
+{cat_instruction}
+{brand_instruction}
+{cta_instruction}
 Topic: {topic}
 
-Return ONLY valid JSON (no markdown, no backticks):
+Generate Instagram-optimized content. Return ONLY valid JSON (no markdown, no backticks):
 {{
-  "headline": "Short engaging title (max {max_chars} chars, {max_chars//10} words max)",
-  "subheading": "Supporting line that expands on headline (1 line only)",
-  "hook": "Attention-grabbing first line - {g_rule['hook_style']}",
-  "caption": "Main body - 1-2 short sentences for promotion (keep brief for {p_rule['density']} density)",
-  "cta": "Call-to-action - {g_rule['cta_style']} style{f' - {cta_text}' if cta_text else ''}",
-  "hashtags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
-  "content_angle": "The creative angle or emotional trigger used"
-}}"""
-    
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    
-    text = response.text.strip()
-    if text.startswith("```"):
-        text = text[text.find("{"):text.rfind("}")+1]
-    
-    parsed = json.loads(text)
-    return parsed
-
-def call_gemini(topic: str):
-    prompt = f"""Generate marketing content for the topic: {topic}
-
-Return ONLY valid JSON (no markdown, no backticks, no extra text):
-{{
-  "headline": "Short engaging title (max 8 words)",
-  "hook": "Attention-grabbing first line for the post",
-  "caption": "Main body - 2-3 sentences of engaging content for promotion",
-  "cta": "Clear call-to-action (Visit, Buy, Learn More, Shop Now, etc.)",
+  "headline": "Short engaging headline (max 8 words)",
+  "hook": "Attention-grabbing first line (1 sentence)",
+  "caption": "Main body text (2-3 short sentences for business promotion)",
+  "cta": "Clear call-to-action ({cta_text if cta_text else 'Visit, Learn More, Sign Up, Shop Now'})",
   "hashtags": ["tag1", "tag2", "tag3", "tag4", "tag5"]
 }}"""
-    
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    
+
+    response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
     text = response.text.strip()
     if text.startswith("```"):
         text = text[text.find("{"):text.rfind("}")+1]
-    
-    parsed = json.loads(text)
-    return parsed
+    return json.loads(text)
 
-# ── History & Dashboard Endpoints ────────────────────────────────────────────
 
-@app.get("/api/v1/history")
-async def get_history_endpoint(request: Request, page: int = 1, limit: int = 12):
-    """Get paginated generation history for current session."""
+# ── Session / User Endpoints ───────────────────────────────────────────────────
+
+@app.get("/api/session")
+async def get_session(request: Request):
     session_id = request.state.session_id
-    offset = (page - 1) * limit
-    
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ?", (session_id,))
-    total = c.fetchone()[0]
-    
-    c.execute("""SELECT id, topic, headline, hook, caption, cta, hashtags, image_path, 
-                  template_id, liked, favorite, view_count, created_at
-                  FROM posts WHERE session_id = ?
-                  ORDER BY created_at DESC LIMIT ? OFFSET ?""",
-              (session_id, limit, offset))
-    rows = c.fetchall()
-    conn.close()
-    
-    posts = []
-    for row in rows:
-        posts.append({
-            "id": row[0],
-            "topic": row[1],
-            "headline": row[2],
-            "hook": row[3],
-            "caption": row[4],
-            "cta": row[5],
-            "hashtags": json.loads(row[6]) if row[6] else [],
-            "image_path": row[7],
-            "template_id": row[8],
-            "liked": bool(row[9]),
-            "favorite": bool(row[10]),
-            "view_count": row[11],
-            "created_at": row[12]
-        })
-    
-    return {
-        "status": "success",
-        "posts": posts,
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "total_pages": max(1, (total + limit - 1) // limit)
-    }
+    user = get_or_create_user(session_id)
+    return {"status": "success", "session_id": session_id, "user": user}
 
-@app.get("/api/v1/stats")
-async def get_stats_endpoint(request: Request):
-    """Get generation statistics for current session."""
+
+# ── Template Endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/api/templates")
+async def list_templates(request: Request):
     session_id = request.state.session_id
-    
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ?", (session_id,))
-    total_posts = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND date(created_at) = date('now')", (session_id,))
-    posts_today = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND created_at >= datetime('now', '-7 days')", (session_id,))
-    posts_week = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM posts WHERE session_id = ? AND favorite = 1", (session_id,))
-    favorites = c.fetchone()[0]
-    
-    c.execute("SELECT COALESCE(SUM(view_count), 0) FROM posts WHERE session_id = ?", (session_id,))
-    total_views = c.fetchone()[0]
-    
-    c.execute("SELECT hashtags FROM posts WHERE session_id = ? AND hashtags IS NOT NULL ORDER BY created_at DESC LIMIT 50", (session_id,))
-    hashtag_rows = c.fetchall()
-    
-    hashtag_counts = {}
-    for hr in hashtag_rows:
-        tags = json.loads(hr[0]) if hr[0] else []
-        for tag in tags:
-            hashtag_counts[tag] = hashtag_counts.get(tag, 0) + 1
-    top_hashtags = sorted(hashtag_counts.items(), key=lambda x: -x[1])[:10]
-    
-    conn.close()
-    
-    return {
-        "status": "success",
-        "stats": {
-            "total_posts": total_posts,
-            "posts_today": posts_today,
-            "posts_week": posts_week,
-            "favorites": favorites,
-            "total_views": total_views,
-            "top_hashtags": [{"tag": t, "count": c} for t, c in top_hashtags]
-        }
-    }
-
-@app.post("/api/v1/posts/{post_id}/favorite")
-async def toggle_favorite_endpoint(request: Request, post_id: int):
-    """Toggle favorite status for a post."""
-    session_id = request.state.session_id
-    
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("SELECT favorite FROM posts WHERE id = ? AND session_id = ?", (post_id, session_id))
-    row = c.fetchone()
-    
-    if not row:
-        conn.close()
-        return {"error": "Post not found"}
-    
-    new_value = 0 if row[0] else 1
-    c.execute("UPDATE posts SET favorite = ? WHERE id = ?", (new_value, post_id))
-    conn.commit()
-    conn.close()
-    
-    return {
-        "status": "success",
-        "favorite": bool(new_value),
-        "message": "Added to favorites" if new_value else "Removed from favorites"
-    }
-
-@app.delete("/api/v1/posts/{post_id}")
-async def delete_post_endpoint(request: Request, post_id: int):
-    """Delete a post."""
-    session_id = request.state.session_id
-    
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("SELECT image_path FROM posts WHERE id = ? AND session_id = ?", (post_id, session_id))
-    row = c.fetchone()
-    
-    if not row:
-        conn.close()
-        return {"error": "Post not found"}
-    
-    image_path = row[0]
-    if image_path and os.path.exists(image_path):
-        try:
-            os.remove(image_path)
-        except:
-            pass
-    
-    c.execute("DELETE FROM posts WHERE id = ? AND session_id = ?", (post_id, session_id))
-    conn.commit()
-    conn.close()
-    
-    return {"status": "success", "message": "Post deleted"}
-
-# ── Session Endpoints ───────────────────────────────────────────────────────────
-@app.get("/session")
-async def get_current_session(request: Request):
-    """Get current session information."""
-    session_id = request.state.session_id
-    session = get_session(session_id)
-    if session:
-        return {
-            "session_id": session["session_id"],
-            "created_at": session["created_at"],
-            "last_activity": session["last_activity"]
-        }
-    return {"error": "Session not found"}
-
-# ── Platform & Goal Endpoints ─────────────────────────────────────────────────
-
-@app.get("/api/v1/platforms")
-async def get_platforms_endpoint():
-    """Get all available platforms with their rules."""
-    platforms = get_platforms()
-    return {"status": "success", "platforms": platforms}
-
-@app.get("/api/v1/goals")
-async def get_goals_endpoint():
-    """Get all content goals with their styles."""
-    goals = get_goals()
-    return {"status": "success", "goals": goals}
-
-@app.get("/api/v1/templates")
-async def get_templates_endpoint(platform: str = None):
-    """Get templates, optionally filtered by platform compatibility."""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    
-    if platform:
-        c.execute("SELECT id, name, frame_size, config_json FROM templates WHERE LOWER(name) LIKE ?", (f'%{platform.lower()}%',))
-    else:
-        c.execute("SELECT id, name, frame_size, config_json FROM templates")
-    
-    rows = c.fetchall()
-    conn.close()
-    
-    templates = []
-    for r in rows:
-        templates.append({
-            "id": r[0], "name": r[1], "frame_size": r[2], "config_json": r[3]
-        })
-    
+    templates = get_templates(session_id)
     return {"status": "success", "templates": templates}
 
-# ── Export Endpoints ──────────────────────────────────────────────────────────
+@app.get("/api/templates/{template_id}")
+async def get_template_endpoint(template_id: int):
+    template = get_template(template_id)
+    if not template:
+        return {"error": "Template not found"}
+    return {"status": "success", "template": template}
 
-@app.get("/api/v1/export/download")
-async def export_download_endpoint(request: Request, post_id: int = None, image_path: str = None):
-    """Download a generated image."""
-    file_path = None
-    
-    if post_id:
-        conn = sqlite3.connect('database.db')
-        c = conn.cursor()
-        c.execute("SELECT image_path FROM posts WHERE id = ?", (post_id,))
-        row = c.fetchone()
+@app.post("/api/templates")
+async def create_template_endpoint(request: Request, data: TemplateCreate):
+    session_id = request.state.session_id
+    template = create_template(session_id, data.dict())
+    return {"status": "success", "template": template}
+
+@app.post("/api/templates/{template_id}/duplicate")
+async def duplicate_template_endpoint(request: Request, template_id: int):
+    """Duplicate an existing template (user-created or default)."""
+    session_id = request.state.session_id
+    original = get_template(template_id)
+    if not original:
+        return {"error": "Template not found"}
+    dup = create_template(session_id, {
+        "name": f"{original['name']} (Copy)",
+        "aspect_ratio": original["aspect_ratio"],
+        "width": original["width"],
+        "height": original["height"],
+        "elements": [{"element_key": e["element_key"], "x": e["x"], "y": e["y"],
+                       "font_size": e["font_size"], "font_family": e.get("font_family", "Poppins"),
+                       "color_hex": e.get("color_hex", "#1A2A4A"),
+                       "max_chars": e.get("max_chars"), "max_lines": e.get("max_lines", 2),
+                       "alignment": e.get("alignment", "center"),
+                       "background_color_hex": e.get("background_color_hex")}
+                      for e in original.get("elements", [])]
+    })
+    return {"status": "success", "template": dup}
+
+@app.put("/api/templates/{template_id}")
+async def update_template_endpoint(template_id: int, data: TemplateUpdate):
+    template = update_template(template_id, data.dict(exclude_none=True))
+    if not template:
+        return {"error": "Template not found"}
+    return {"status": "success", "template": template}
+
+@app.delete("/api/templates/{template_id}")
+async def delete_template_endpoint(template_id: int):
+    deleted = delete_template(template_id)
+    if not deleted:
+        return {"error": "Template not found or is default"}
+    return {"status": "success", "message": "Template deleted"}
+
+
+# ── Content Generation Endpoint ───────────────────────────────────────────────
+
+@app.post("/api/generate")
+async def generate_post_endpoint(request: Request, data: GenerateRequest):
+    """Generate Instagram content + image."""
+    try:
+        start_time = time.time()
+        session_id = request.state.session_id
+
+        # Get template to check aspect ratio
+        template = get_template(data.template_id)
+        if not template:
+            return {"error": "Template not found"}
+        aspect_ratio = template.get("aspect_ratio", data.aspect_ratio)
+
+        # Generate AI content
+        content_data = call_gemini(
+            topic=data.topic,
+            category=data.category,
+            brand_name=data.brand_name,
+            cta_text=data.cta_text
+        )
+
+        # Generate image
+        image_path = generate_post_image(
+            data.template_id, data.topic, content_data
+        )
+
+        # Store in DB
+        hashtags_json = json.dumps(content_data.get("hashtags", []))
+        post_id = create_post(session_id, {
+            "template_id": data.template_id,
+            "aspect_ratio": aspect_ratio,
+            "topic": data.topic,
+            "headline": content_data.get("headline", ""),
+            "hook": content_data.get("hook", ""),
+            "caption": content_data.get("caption", ""),
+            "cta": content_data.get("cta", ""),
+            "hashtags": hashtags_json,
+            "image_path": image_path,
+            "category": data.category,
+            "brand_name": data.brand_name,
+            "is_draft": 0,
+        })
+
+        # Track analytics
+        track_event(session_id, "generation", {
+            "template_id": data.template_id,
+            "aspect_ratio": aspect_ratio,
+            "category": data.category,
+            "duration_ms": int((time.time() - start_time) * 1000),
+        })
+
+        return {
+            "status": "success",
+            "post_id": post_id,
+            "headline": content_data.get("headline", ""),
+            "hook": content_data.get("hook", ""),
+            "caption": content_data.get("caption", ""),
+            "cta": content_data.get("cta", ""),
+            "hashtags": content_data.get("hashtags", []),
+            "image_path": image_path,
+            "aspect_ratio": aspect_ratio,
+        }
+    except json.JSONDecodeError as e:
+        return {"error": f"Failed to parse AI response: {str(e)}"}
+    except Exception as e:
+        return {"error": f"Generation failed: {str(e)}"}
+
+
+# ── Post Endpoints (History) ───────────────────────────────────────────────────
+
+@app.get("/api/posts")
+async def list_posts(request: Request, page: int = 1, limit: int = 12):
+    session_id = request.state.session_id
+    result = get_posts(session_id, page, limit, is_draft=False)
+    return {"status": "success", **result}
+
+@app.get("/api/posts/{post_id}")
+async def get_post_endpoint(post_id: int):
+    post = get_post(post_id)
+    if not post:
+        return {"error": "Post not found"}
+    return {"status": "success", "post": post}
+
+@app.delete("/api/posts/{post_id}")
+async def delete_post_endpoint(post_id: int):
+    deleted = delete_post(post_id)
+    if not deleted:
+        return {"error": "Post not found"}
+    return {"status": "success", "message": "Post deleted"}
+
+@app.post("/api/posts/{post_id}/duplicate")
+async def duplicate_post_endpoint(post_id: int):
+    """Duplicate an existing post."""
+    session_id = request.state.session_id
+    post = get_post(post_id)
+    if not post:
+        return {"error": "Post not found"}
+    new_post_id = create_post(session_id, {
+        "template_id": post["template_id"],
+        "aspect_ratio": post["aspect_ratio"],
+        "topic": post["topic"],
+        "headline": post["headline"],
+        "hook": post["hook"],
+        "caption": post["caption"],
+        "cta": post["cta"],
+        "hashtags": post["hashtags"],
+        "image_path": post["image_path"],
+        "category": post["category"],
+        "brand_name": post["brand_name"],
+        "is_draft": 0,
+    })
+    new_post = get_post(new_post_id)
+    return {"status": "success", "post": new_post}
+
+
+# ── Draft Endpoints ────────────────────────────────────────────────────────────
+
+@app.get("/api/drafts")
+async def list_drafts(request: Request, page: int = 1, limit: int = 12):
+    session_id = request.state.session_id
+    result = get_posts(session_id, page, limit, is_draft=True)
+    return {"status": "success", **result}
+
+@app.post("/api/drafts")
+async def create_draft(request: Request, data: PostDraftRequest):
+    session_id = request.state.session_id
+    post_id = create_post(session_id, {**data.dict(), "is_draft": 1})
+    post = get_post(post_id)
+    return {"status": "success", "post": post}
+
+@app.put("/api/drafts/{draft_id}")
+async def update_draft(draft_id: int, data: PostDraftRequest):
+    """Update an existing draft."""
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    c.execute("SELECT session_id FROM posts WHERE id = ?", (draft_id,))
+    row = c.fetchone()
+    if not row:
         conn.close()
-        if row:
-            file_path = row[0]
-            conn = sqlite3.connect('database.db')
-            c = conn.cursor()
-            c.execute("UPDATE posts SET view_count = view_count + 1, last_downloaded = CURRENT_TIMESTAMP WHERE id = ?", (post_id,))
-            conn.commit()
-            conn.close()
-    elif image_path:
-        file_path = image_path
-    else:
-        return JSONResponse(status_code=400, content={"error": "Provide post_id or image_path"})
-    
-    if not file_path or not os.path.exists(file_path):
-        return JSONResponse(status_code=404, content={"error": "Image not found"})
-    
-    filename = os.path.basename(file_path)
+        return {"error": "Draft not found"}
+    c.execute("""UPDATE posts SET template_id = ?, aspect_ratio = ?, topic = ?,
+                  headline = ?, hook = ?, caption = ?, cta = ?, hashtags = ?,
+                  image_path = ?, category = ?, brand_name = ?
+                  WHERE id = ?""",
+              (data.template_id, data.aspect_ratio, data.topic, data.headline,
+               data.hook, data.caption, data.cta, data.hashtags, data.image_path,
+               data.category, data.brand_name, draft_id))
+    conn.commit()
+    conn.close()
+    post = get_post(draft_id)
+    return {"status": "success", "post": post}
+
+@app.delete("/api/drafts/{draft_id}")
+async def delete_draft(draft_id: int):
+    """Delete a draft."""
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    c.execute("SELECT is_draft FROM posts WHERE id = ?", (draft_id,))
+    row = c.fetchone()
+    if not row or not row[0]:
+        conn.close()
+        return {"error": "Draft not found"}
+    c.execute("DELETE FROM posts WHERE id = ?", (draft_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Draft deleted"}
+
+@app.post("/api/drafts/{draft_id}/duplicate")
+async def duplicate_draft(draft_id: int):
+    """Duplicate a draft."""
+    session_id = request.state.session_id
+    post = get_post(draft_id)
+    if not post:
+        return {"error": "Draft not found"}
+    new_post_id = create_post(session_id, {
+        "template_id": post["template_id"],
+        "aspect_ratio": post["aspect_ratio"],
+        "topic": post["topic"],
+        "headline": post["headline"],
+        "hook": post["hook"],
+        "caption": post["caption"],
+        "cta": post["cta"],
+        "hashtags": post["hashtags"],
+        "image_path": post["image_path"],
+        "category": post["category"],
+        "brand_name": post["brand_name"],
+        "is_draft": 1,
+    })
+    new_post = get_post(new_post_id)
+    return {"status": "success", "post": new_post}
+
+
+# ── Category Endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/api/categories")
+async def list_categories():
+    categories = get_categories()
+    return {"status": "success", "categories": categories}
+
+
+# ── Analytics Endpoints ────────────────────────────────────────────────────────
+
+@app.get("/api/analytics")
+async def get_analytics_endpoint(request: Request):
+    session_id = request.state.session_id
+    stats = get_analytics(session_id)
+    return {"status": "success", "analytics": stats}
+
+
+# ── Export Endpoints ───────────────────────────────────────────────────────────
+
+@app.get("/api/posts/{post_id}/export")
+async def export_post(request: Request, post_id: int, format: str = "png"):
+    session_id = request.state.session_id
+    post = get_post(post_id)
+    if not post:
+        return {"error": "Post not found"}
+
+    image_path = post.get("image_path")
+    if not image_path or not os.path.exists(image_path):
+        return {"error": "Image file not found"}
+
+    # Track download
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    c.execute("UPDATE posts SET download_count = download_count + 1 WHERE id = ?", (post_id,))
+    conn.commit()
+    conn.close()
+
+    filename = f"kyma_post_{post_id}.{format}"
     return FileResponse(
-        path=file_path,
-        media_type="image/png",
+        path=image_path,
+        media_type="image/png" if format == "png" else "image/jpeg",
         filename=filename,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
-@app.post("/api/v1/export/get-text")
-async def export_get_text_endpoint(request: Request, data: ExportTextRequest):
-    """Get formatted text from a post (caption + CTA + hashtags)."""
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("SELECT caption, cta, hashtags FROM posts WHERE id = ?", (data.post_id,))
-    row = c.fetchone()
-    conn.close()
-    
-    if not row:
-        return {"error": "Post not found"}
-    
-    caption, cta, hashtags_json = row
-    hashtags = json.loads(hashtags_json) if hashtags_json else []
-    hashtags_str = " ".join(hashtags)
-    
-    text_parts = [p for p in [caption, cta, hashtags_str] if p]
-    formatted_text = "\n\n".join(text_parts)
-    
-    return {
-        "status": "success",
-        "text": formatted_text,
-        "caption": caption,
-        "cta": cta,
-        "hashtags": hashtags_str
-    }
 
-# ── Generate V2 Endpoint ──────────────────────────────────────────────────────
+# ── Image Upload Endpoint (Background Replacement) ───────────────────────────
 
-@app.post("/api/v1/generate-v2")
-async def generate_post_v2(request: Request, data: GenerateV2Request):
-    """Enhanced generation with platform + goal awareness."""
-    try:
-        session_id = request.state.session_id
-        
-        platforms = get_platforms()
-        goals = get_goals()
-        platform = next((p for p in platforms if p['id'] == data.platform_id), None)
-        goal = next((g for g in goals if g['id'] == data.goal_id), None)
-        
-        if not platform or not goal:
-            return {"error": "Invalid platform or goal selection"}
-        
-        content_data = call_gemini_v2(
-            platform, goal, data.topic,
-            industry=data.industry,
-            audience=data.target_audience,
-            tone=data.tone,
-            cta_text=data.cta_text
-        )
-        
-        image_path = generate_post_image(data.template_id, data.topic, content_data)
-        
-        conn = sqlite3.connect('database.db')
-        c = conn.cursor()
-        c.execute("""INSERT INTO posts (session_id, platform_id, goal_id, topic, 
-                    headline, subheading, hook, caption, cta, hashtags, image_path, template_id, 
-                    industry, tone, target_audience)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (session_id,
-                   data.platform_id, data.goal_id,
-                   data.topic,
-                   content_data.get('headline', ''),
-                   content_data.get('subheading', ''),
-                   content_data.get('hook', ''),
-                   content_data.get('caption', ''),
-                   content_data.get('cta', ''),
-                   json.dumps(content_data.get('hashtags', [])),
-                   image_path,
-                   data.template_id,
-                   data.industry,
-                   data.tone,
-                   data.target_audience))
-        post_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        
-        return {
-            "status": "success",
-            "post_id": post_id,
-            "platform": platform['name'],
-            "goal": goal['name'],
-            "headline": content_data.get('headline', ''),
-            "subheading": content_data.get('subheading', ''),
-            "hook": content_data.get('hook', ''),
-            "caption": content_data.get('caption', ''),
-            "cta": content_data.get('cta', ''),
-            "hashtags": content_data.get('hashtags', []),
-            "content_angle": content_data.get('content_angle', ''),
-            "image_path": image_path,
-            "design_rules": {
-                "platform": platform['key'],
-                "text_density": next((pr['density'] for pk, pr in [
-                    ('instagram', {'density': 'minimal'}), ('linkedin', {'density': 'medium'}),
-                    ('twitter', {'density': 'minimal'}), ('facebook', {'density': 'medium'})
-                ] if pk == platform['key']), 'minimal')
-            }
-        }
-    except json.JSONDecodeError as e:
-        return {"error": f"Failed to parse Gemini response as JSON: {str(e)}"}
-    except Exception as e:
-        return {"error": f"Generation failed: {str(e)}"}
-
-# ── Canvas Editor Endpoints ──────────────────────────────────────────────────
-
-@app.get("/api/v1/canvas-edit/{post_id}")
-async def get_canvas_edit_endpoint(post_id: int):
-    """Get saved canvas edits for a post."""
-    edits = get_canvas_edit(post_id)
-    return {"status": "success", "edits": edits}
-
-@app.post("/api/v1/canvas-edit/{post_id}/save")
-async def save_canvas_edit_endpoint(post_id: int, data: CanvasEditRequest):
-    """Save custom positioning for a post."""
-    edits = {k: v for k, v in data.dict().items() if v is not None}
-    saved = save_canvas_edit(post_id, edits)
-    return {"status": "success", "edits": saved}
-
-@app.post("/api/v1/canvas-edit/{post_id}/preview")
-async def preview_canvas_edit_endpoint(request: Request, post_id: int, data: CanvasEditRequest):
-    """Re-render an existing post with custom positioning and return new image."""
+@app.post("/api/posts/{post_id}/image/background")
+async def upload_background(request: Request, post_id: int, file: UploadFile = File(...)):
+    """Upload a custom background image for a post."""
     session_id = request.state.session_id
-    
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in {'.png', '.jpg', '.jpeg', '.webp'}:
+        return JSONResponse(status_code=400, content={"error": "Invalid file type. Use PNG, JPG, or WebP."})
+
+    unique_name = f"bg_{post_id}_{uuid.uuid4().hex[:8]}{ext}"
+    file_path = f"uploads/posts/{unique_name}"
+    os.makedirs("uploads/posts", exist_ok=True)
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Update post's image_path to use new background
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
-    c.execute("""SELECT topic, headline, hook, caption, cta, hashtags, image_path, template_id 
-                  FROM posts WHERE id = ? AND session_id = ?""", (post_id, session_id))
+    c.execute("UPDATE posts SET image_path = ? WHERE id = ?", (file_path, post_id))
+    conn.commit()
+    conn.close()
+
+    return {"status": "success", "image_path": file_path, "filename": file.filename, "filesize": len(content)}
+
+@app.delete("/api/posts/{post_id}/image/background")
+async def delete_background(post_id: int):
+    """Remove custom background and reset to template default."""
+    conn = sqlite3.connect('database.db')
+    c = conn.cursor()
+    c.execute("SELECT template_id FROM posts WHERE id = ?", (post_id,))
     row = c.fetchone()
-    conn.close()
-    
     if not row:
-        return {"error": "Post not found"}
-    
-    topic, headline, hook, caption, cta, hashtags_json, old_image_path, template_id = row
-    hashtags = json.loads(hashtags_json) if hashtags_json else []
-    
-    canvas_edits = {k: v for k, v in data.dict().items() if v is not None}
-    
-    content_data = {
-        "headline": headline,
-        "hook": hook,
-        "caption": caption,
-        "cta": cta,
-        "hashtags": hashtags
-    }
-    new_image_path = generate_post_image(
-        template_id, f"preview_{post_id}", content_data, canvas_edits=canvas_edits
-    )
-    
-    return {
-        "status": "success",
-        "image_path": new_image_path
-    }
-
-@app.delete("/api/v1/canvas-edit/{post_id}/reset")
-async def reset_canvas_edit_endpoint(post_id: int):
-    """Reset canvas edits to template defaults."""
-    deleted = delete_canvas_edit(post_id)
-    return {"status": "success", "reset": deleted}
-
-# ── Legacy Endpoints ──────────────────────────────────────────────────────────
-
-@app.get("/templates")
-async def get_templates():
-    conn = sqlite3.connect('database.db')
-    c = conn.cursor()
-    c.execute("SELECT id, name, frame_size FROM templates")
-    rows = c.fetchall()
-    conn.close()
-    return [{"id": r[0], "name": r[1], "frame_size": r[2]} for r in rows]
-
-@app.post("/generate")
-async def generate_post(request: Request, data: PostRequest):
-    try:
-        session_id = request.state.session_id
-        
-        content_data = call_gemini(data.topic)
-        image_path = generate_post_image(data.template_id, data.topic, content_data)
-        
-        conn = sqlite3.connect('database.db')
-        c = conn.cursor()
-        c.execute("""INSERT INTO posts (session_id, topic, headline, hook, caption, cta, hashtags, image_path, template_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  (session_id,
-                   data.topic, content_data['headline'], content_data['hook'], 
-                   content_data['caption'], content_data['cta'], 
-                   json.dumps(content_data['hashtags']), image_path, data.template_id))
-        post_id = c.lastrowid
-        conn.commit()
         conn.close()
-        
-        return {
-            "status": "success",
-            "post_id": post_id,
-            "headline": content_data['headline'],
-            "hook": content_data['hook'],
-            "caption": content_data['caption'],
-            "cta": content_data['cta'],
-            "hashtags": content_data['hashtags'],
-            "image_path": image_path
-        }
-    except json.JSONDecodeError as e:
-        return {"error": f"Failed to parse Gemini response as JSON: {str(e)}"}
-    except Exception as e:
-        return {"error": f"Generation failed: {str(e)}"}
+        return {"error": "Post not found"}
+    template_id = row[0]
+    default_path = f"templates/template_{template_id}.png"
+    c.execute("UPDATE posts SET image_path = ? WHERE id = ?", (default_path, post_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "message": "Background reset to template default"}
+
+
+# ── Font List Endpoint ────────────────────────────────────────────────────────
+
+@app.get("/api/fonts")
+async def list_fonts():
+    """Return available font families for text customization."""
+    fonts = [
+        {"name": "Poppins", "key": "poppins"},
+        {"name": "Inter", "key": "inter"},
+        {"name": "Roboto", "key": "roboto"},
+        {"name": "Open Sans", "key": "open-sans"},
+        {"name": "Lato", "key": "lato"},
+        {"name": "Montserrat", "key": "montserrat"},
+        {"name": "Playfair Display", "key": "playfair"},
+        {"name": "Source Sans Pro", "key": "source-sans"},
+    ]
+    return {"status": "success", "fonts": fonts}
+
+
+# ── Utility ────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "platform": "Kyma AI Instagram Content Generator"}

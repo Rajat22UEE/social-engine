@@ -2,10 +2,17 @@
 
 import { useState, useEffect } from "react";
 
-interface SessionData {
+const API_BASE = "http://127.0.0.1:8000";
+
+export interface SessionData {
   session_id: string;
-  created_at: string;
-  last_activity: string;
+  user: {
+    id: number;
+    session_id: string;
+    name: string;
+    email: string;
+    created_at: string;
+  };
 }
 
 export function useSession() {
@@ -13,44 +20,16 @@ export function useSession() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function fetchSession() {
-      try {
-        const res = await fetch("http://127.0.0.1:8000/session", {
-          credentials: "include", // Include cookies in request
-        });
-        const data = await res.json();
-        if (data.session_id) {
+    fetch(`${API_BASE}/api/session`, { credentials: "include" })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.status === "success") {
           setSession(data);
-          // Also store in localStorage as backup
-          localStorage.setItem("session_id", data.session_id);
         }
-      } catch (err) {
-        console.error("Error fetching session:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchSession();
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
   }, []);
 
-  const refreshSession = async () => {
-    try {
-      const res = await fetch("http://127.0.0.1:8000/session", {
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (data.session_id) {
-        setSession(data);
-        localStorage.setItem("session_id", data.session_id);
-      }
-    } catch (err) {
-      console.error("Error refreshing session:", err);
-    }
-  };
-
-  return {
-    session,
-    loading,
-    refreshSession,
-  };
+  return { session, loading };
 }
