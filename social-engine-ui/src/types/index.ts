@@ -14,4 +14,32 @@ export interface GenerateResult {
 }
 
 export type CreateStep = "topic" | "generating" | "result";
-export type PageView = "dashboard" | "create";
+export type PageView = "dashboard" | "create" | "blog";
+
+export interface FAQItem {
+  question: string;
+  answer: string;
+}
+
+export interface InternalLink {
+  text: string;
+  url: string;
+}
+
+export interface BlogResult {
+  id: number;
+  title: string;
+  meta_title: string;
+  meta_description: string;
+  url_slug: string;
+  primary_keyword: string;
+  secondary_keywords: string[];
+  content: string;
+  word_count: number;
+  faq_questions: FAQItem[];
+  internal_links: InternalLink[];
+  seo_checklist: string[];
+  created_at?: string;
+}
+
+export type BlogStep = "input" | "generating" | "result";

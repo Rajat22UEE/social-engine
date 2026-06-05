@@ -37,7 +37,6 @@ async def generate_post_endpoint(request: Request, data: GenerateRequest):
         # Generate AI content (headline, hook, caption, cta, hashtags)
         content_data = call_gemini(
             topic=data.topic,
-            category=data.category,
             brand_name=data.brand_name,
             cta_text=data.cta_text
         )
@@ -59,7 +58,6 @@ async def generate_post_endpoint(request: Request, data: GenerateRequest):
             "cta": content_data.get("cta", ""),
             "hashtags": hashtags_json,
             "image_path": image_path,
-            "category": data.category,
             "brand_name": data.brand_name,
         })
 

@@ -5,7 +5,7 @@
  * Handles cookie-based session auth and error parsing.
  */
 import { API_BASE } from "../constants";
-import type { GenerateResult } from "../types";
+import type { GenerateResult, BlogResult } from "../types";
 
 // ── Generic fetch helper ─────────────────────────────────────────────────────
 
@@ -32,7 +32,6 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
 export async function generatePost(params: {
   topic: string;
   template_id: number;
-  category?: string;
   brand_name?: string;
   cta_text?: string;
 }): Promise<GenerateResult> {
@@ -40,6 +39,23 @@ export async function generatePost(params: {
     method: "POST",
     body: JSON.stringify(params),
   });
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+// ── Blog Generator (AI SEO Blog) ──────────────────────────────────────────────
+
+export async function generateBlog(topic: string): Promise<BlogResult> {
+  const data = await apiFetch<BlogResult & { error?: string }>("/api/blog/generate", {
+    method: "POST",
+    body: JSON.stringify({ topic }),
+  });
+  if (data.error) throw new Error(data.error);
+  return data;
+}
+
+export async function getBlog(id: number): Promise<BlogResult> {
+  const data = await apiFetch<BlogResult & { error?: string }>(`/api/blog/${id}`);
   if (data.error) throw new Error(data.error);
   return data;
 }

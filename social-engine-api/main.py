@@ -20,8 +20,8 @@ from db.users import get_or_create_user
 from routes.session import router as session_router
 from routes.generate import router as generate_router
 from routes.posts import router as posts_router
-from routes.categories import router as categories_router
 from routes.health import router as health_router
+from routes.blog import router as blog_router
 
 # ── Load environment & initialize database ────────────────────────────────────
 load_dotenv()
@@ -76,5 +76,5 @@ async def session_middleware(request: Request, call_next):
 app.include_router(session_router)
 app.include_router(generate_router)
 app.include_router(posts_router)
-app.include_router(categories_router)
 app.include_router(health_router)
+app.include_router(blog_router)

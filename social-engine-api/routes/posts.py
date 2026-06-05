@@ -16,7 +16,7 @@ router = APIRouter()
 async def export_post(request: Request, post_id: int, format: str = "png"):
     """
     Download a post's generated image.
-    Tracks the download in analytics and increments download count.
+    Increments download count counter.
     """
     post = get_post(post_id)
     if not post:

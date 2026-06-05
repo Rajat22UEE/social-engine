@@ -64,7 +64,6 @@ def init_db():
         cta TEXT,
         hashtags TEXT,
         image_path TEXT,
-        category TEXT,
         brand_name TEXT,
         view_count INTEGER DEFAULT 0,
         download_count INTEGER DEFAULT 0,
@@ -111,6 +110,26 @@ def init_db():
                 (template_id, element_key, x, y, font_size, color_hex, max_chars, max_lines, alignment)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'center')""",
                       (story_id, key, x, y, size, color, chars, lines))
+
+    # ── Blog Posts table (AI SEO Blog Generator) ─────────────────────────────
+    c.execute('''CREATE TABLE IF NOT EXISTS blog_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT,
+        topic TEXT NOT NULL,
+        primary_keyword TEXT DEFAULT '',
+        title TEXT DEFAULT '',
+        meta_title TEXT DEFAULT '',
+        meta_description TEXT DEFAULT '',
+        url_slug TEXT DEFAULT '',
+        content TEXT DEFAULT '',
+        word_count INTEGER DEFAULT 0,
+        faq_questions TEXT DEFAULT '[]',
+        internal_links TEXT DEFAULT '[]',
+        seo_checklist TEXT DEFAULT '[]',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (session_id) REFERENCES users(session_id)
+    )''')
 
     conn.commit()
     conn.close()

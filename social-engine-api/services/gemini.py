@@ -29,20 +29,8 @@ def _get_client():
     return _gemini_client
 
 
-CATEGORY_PROMPTS = {
-    'educational': 'Educational content — share knowledge and industry insights.',
-    'promotional': 'Promotional content — highlight value proposition and CTA.',
-    'case_study': 'Case study — present before/after or problem/solution narrative.',
-    'engagement': 'Engagement content — ask questions, spark conversations.',
-    'branding': 'Branding content — company intro, culture, team spotlight.',
-    'testimonial': 'Testimonial — showcase customer reviews and social proof.',
-    'event': 'Event promotion — create urgency, highlight event details.',
-    'quote': 'Quote — inspirational or thought leadership statement.',
-}
-
-
 # Only retry on rate limits / transient failures, not on auth errors
-def call_gemini(topic: str, category: str = None, brand_name: str = None, cta_text: str = None) -> dict:
+def call_gemini(topic: str, brand_name: str = None, cta_text: str = None) -> dict:
     """
     Generate Instagram marketing content using Gemini AI.
     Retries up to 3 times on transient errors.
@@ -50,14 +38,12 @@ def call_gemini(topic: str, category: str = None, brand_name: str = None, cta_te
     Returns:
         Dict with keys: headline, hook, caption, cta, hashtags
     """
-    cat_instruction = CATEGORY_PROMPTS.get(category, 'Professional business promotion content.')
     brand_instruction = f"Brand: {brand_name}. " if brand_name else ""
     cta_instruction = f"CTA: {cta_text}. " if cta_text else ""
 
     prompt = f"""You are a professional Instagram content creator for business brands.
 Your tone is professional, polished, and business-focused.
 
-{cat_instruction}
 {brand_instruction}
 {cta_instruction}
 Topic: {topic}
